@@ -1,0 +1,37 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Dump1090</title>
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+        integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin="" />
+    <link rel="stylesheet" href="/web/assets/css/style.css">
+</head>
+<body>
+    <div id="canvas" class="map" aria-label="Aircraft map"></div>
+
+    <aside class="info-panel" id="info-panel" aria-label="Aircraft information panel">
+        <div class="info-panel__header">
+            <div class="info-panel__heading">
+                <h1 class="info-panel__title">Dump1090</h1>
+                <p id="generalInfo" class="info-panel__text"></p>
+            </div>
+            <button
+                type="button"
+                id="clearSelectionButton"
+                class="info-panel__clear-button is-hidden"
+                aria-label="Clear selected aircraft"
+                title="Clear selection"
+            >Clear</button>
+        </div>
+        <div class="info-panel__content">
+            <p id="aircraftInfo" class="info-panel__text"></p>
+        </div>
+    </aside>
+
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
+        integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
+    <script type="module" src="/web/assets/js/main.js"></script>
+</body>
+</html>

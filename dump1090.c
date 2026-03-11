@@ -3,18 +3,18 @@
  * Copyright (C) 2012 by Salvatore Sanfilippo <antirez@gmail.com>
  *
  * All rights reserved.
- * 
+ *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions are
  * met:
- * 
+ *
  *  *  Redistributions of source code must retain the above copyright
  *     notice, this list of conditions and the following disclaimer.
  *
  *  *  Redistributions in binary form must reproduce the above copyright
  *     notice, this list of conditions and the following disclaimer in the
  *     documentation and/or other materials provided with the distribution.
- * 
+ *
  * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
  * "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
  * LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
@@ -37,6 +37,7 @@
 #include <unistd.h>
 #include <math.h>
 #include <sys/time.h>
+#include <time.h>
 #include <signal.h>
 #include <fcntl.h>
 #include <ctype.h>
@@ -113,6 +114,7 @@ struct aircraft {
     uint32_t addr;      /* ICAO address */
     char hexaddr[7];    /* Printable ICAO address */
     char flight[9];     /* Flight number */
+    int emitter_category; /* Emitter category */
     int altitude;       /* Altitude */
     int speed;          /* Velocity computed from EW and NS components. */
     int track;          /* Angle of flight. */
@@ -228,7 +230,7 @@ struct modesMessage {
     int mesub;                  /* Extended squitter message subtype. */
     int heading_is_valid;
     int heading;
-    int aircraft_type;
+    int emitter_category;
     int fflag;                  /* 1 = Odd, 0 = Even CPR message. */
     int tflag;                  /* UTC synchronized? */
     int raw_latitude;           /* Non decoded latitude */
@@ -468,14 +470,6 @@ void readDataFromFile(void) {
             continue;
         }
 
-        if (Modes.interactive) {
-            /* When --ifile and --interactive are used together, slow down
-             * playing at the natural rate of the RTLSDR received. */
-            pthread_mutex_unlock(&Modes.data_mutex);
-            usleep(5000);
-            pthread_mutex_lock(&Modes.data_mutex);
-        }
-
         /* Move the last part of the previous buffer, that was not processed,
          * on the start of the new buffer. */
         memcpy(Modes.data, Modes.data+MODES_DATA_LEN, (MODES_FULL_LEN-1)*4);
@@ -504,6 +498,24 @@ void readDataFromFile(void) {
             /* Not enough data on file to fill the buffer? Pad with
              * no signal. */
             memset(p,127,toread);
+        }
+        if (Modes.interactive || Modes.net) {
+            /* With --ifile in interactive or network-serving modes, replay
+             * data at the same rate it would arrive from the SDR: 2 bytes
+             * per sample at MODES_DEFAULT_RATE samples per second. */
+            ssize_t bytes_read = MODES_DATA_LEN - toread;
+            if (bytes_read > 0) {
+                uint64_t delay_us =
+                    (((uint64_t)bytes_read * 1000000) /
+                     (MODES_DEFAULT_RATE * 2));
+                struct timespec delay = {
+                    .tv_sec = delay_us / 1000000,
+                    .tv_nsec = (delay_us % 1000000) * 1000
+                };
+                pthread_mutex_unlock(&Modes.data_mutex);
+                nanosleep(&delay, NULL);
+                pthread_mutex_lock(&Modes.data_mutex);
+            }
         }
         Modes.data_ready = 1;
         /* Signal to the other thread that new data is ready */
@@ -968,7 +980,7 @@ int bruteForceAP(unsigned char *msg, struct modesMessage *mm) {
         aux[lastbyte] ^= crc & 0xff;
         aux[lastbyte-1] ^= (crc >> 8) & 0xff;
         aux[lastbyte-2] ^= (crc >> 16) & 0xff;
-        
+
         /* If the obtained address exists in our cache we consider
          * the message valid. */
         addr = aux[lastbyte] | (aux[lastbyte-1] << 8) | (aux[lastbyte-2] << 16);
@@ -1040,6 +1052,73 @@ char *ca_str[8] = {
     /* 6 */ "Level 2+3+4 (DF0,4,5,11,20,21,24,code7)",
     /* 7 */ "Level 7 ???"
 };
+
+/* ADS-B emitter category lookup by identification/category message encoding.
+ *
+ * The category is encoded as:
+ * - Category set:   metype 1..4  -> A, B, C, D
+ * - Category code:  msg[4] & 7   -> 0..7 within that set
+ *
+ * So the logical values are A0..A7, B0..B7, C0..C7, D0..D7.
+ * Code 0 in each set means "No Emitter Category", which is why that string
+ * appears at the start of every sub-table.
+ *
+ * Public reference:
+ * FAA AC 20-165B Appendix tables:
+ * https://www.faa.gov/documentLibrary/media/Advisory_Circular/AC_20-165B.pdf */
+static const char *emitter_category_labels[4][8] = {
+    {
+        "No Emitter Category",
+        "Light Airplane",
+        "Small Airplane",
+        "Large Airplane",
+        "High Vortex Aircraft",
+        "Heavy Airplane",
+        "High Performance Aircraft",
+        "Rotorcraft"
+    },
+    {
+        "No Emitter Category",
+        "Glider or sailplane",
+        "Lighter Than Air",
+        "Parachute / Sky Diver",
+        "Ultralight Vehicle",
+        "UAV",
+        "Space/Trans-atmospheric Vehicle",
+        "Reserved"
+    },
+    {
+        "No Emitter Category",
+        "Surface Vehicle—Emergency Vehicle",
+        "Surface Vehicle—Service Vehicle",
+        "Point Obstacle (Includes Tethered Balloons)",
+        "Cluster Obstacle",
+        "Line Obstacle",
+        "Reserved",
+        "Reserved"
+    },
+    {
+        "No Emitter Category",
+        "Reserved",
+        "Reserved",
+        "Reserved",
+        "Reserved",
+        "Reserved",
+        "Reserved",
+        "Reserved"
+    }
+};
+
+const char *getEmitterCategoryLabel(int emitter_category) {
+    int category_set = emitter_category >> 3;
+    int category_code = emitter_category & 7;
+
+    if (category_set < 0 || category_set > 3) {
+        return "Unknown";
+    }
+
+    return emitter_category_labels[category_set][category_code];
+}
 
 /* Flight status table. */
 char *fs_str[8] = {
@@ -1223,7 +1302,7 @@ void decodeModesMessage(struct modesMessage *mm, unsigned char *msg) {
 
         if (mm->metype >= 1 && mm->metype <= 4) {
             /* Aircraft Identification and Category */
-            mm->aircraft_type = mm->metype-1;
+            mm->emitter_category = ((4 - mm->metype) << 3) | (msg[4] & 7);
             mm->flight[0] = ais_charset[msg[5]>>2];
             mm->flight[1] = ais_charset[((msg[5]&3)<<4)|(msg[6]>>4)];
             mm->flight[2] = ais_charset[((msg[6]&15)<<2)|(msg[7]>>6)];
@@ -1383,14 +1462,8 @@ void displayModesMessage(struct modesMessage *mm) {
         /* Decode the extended squitter message. */
         if (mm->metype >= 1 && mm->metype <= 4) {
             /* Aircraft identification. */
-            char *ac_type_str[4] = {
-                "Aircraft Type D",
-                "Aircraft Type C",
-                "Aircraft Type B",
-                "Aircraft Type A"
-            };
-
-            printf("    Aircraft Type  : %s\n", ac_type_str[mm->aircraft_type]);
+            printf("    Emitter Cat.   : %s\n",
+                getEmitterCategoryLabel(mm->emitter_category));
             printf("    Identification : %s\n", mm->flight);
         } else if (mm->metype >= 5 && mm->metype <= 8) {
             printf("    F flag   : %s\n", mm->fflag ? "odd" : "even");
@@ -1574,7 +1647,7 @@ void detectModeS(uint16_t *m, uint32_t mlen) {
      * 1.0 - 1.5 usec: second impulse.
      * 3.5 - 4   usec: third impulse.
      * 4.5 - 5   usec: last impulse.
-     * 
+     *
      * Since we are sampling at 2 Mhz every sample in our magnitude vector
      * is 0.5 usec, so the preamble will look like this, assuming there is
      * an impulse at offset 0 in the array:
@@ -1695,13 +1768,13 @@ good_preamble:
         /* Pack bits into bytes */
         for (i = 0; i < MODES_LONG_MSG_BITS; i += 8) {
             msg[i/8] =
-                bits[i]<<7 | 
-                bits[i+1]<<6 | 
-                bits[i+2]<<5 | 
-                bits[i+3]<<4 | 
-                bits[i+4]<<3 | 
-                bits[i+5]<<2 | 
-                bits[i+6]<<1 | 
+                bits[i]<<7 |
+                bits[i+1]<<6 |
+                bits[i+2]<<5 |
+                bits[i+3]<<4 |
+                bits[i+4]<<3 |
+                bits[i+5]<<2 |
+                bits[i+6]<<1 |
                 bits[i+7];
         }
 
@@ -1829,6 +1902,7 @@ struct aircraft *interactiveCreateAircraft(uint32_t addr) {
     a->addr = addr;
     snprintf(a->hexaddr,sizeof(a->hexaddr),"%06x",(int)addr);
     a->flight[0] = '\0';
+    a->emitter_category = 0;
     a->altitude = 0;
     a->speed = 0;
     a->track = 0;
@@ -2106,6 +2180,7 @@ struct aircraft *interactiveReceiveData(struct modesMessage *mm) {
     } else if (mm->msgtype == 17 || mm->msgtype == 18) {
         if (mm->metype >= 1 && mm->metype <= 4) {
             memcpy(a->flight, mm->flight, sizeof(a->flight));
+            a->emitter_category = mm->emitter_category;
         } else if (mm->metype >= 9 && mm->metype <= 18) {
             a->altitude = mm->altitude;
             if (mm->fflag) {
@@ -2176,7 +2251,7 @@ void interactiveShowData(void) {
 
     printf("\x1b[H\x1b[2J");    /* Clear the screen */
     printf(
-"Hex    Flight   Altitude  Speed   Lat       Lon       Track  Messages Seen %s\n"
+"Hex    Flight   Altitude  GndSpd  Lat       Lon       Track  Messages Seen %s\n"
 "--------------------------------------------------------------------------------\n",
         progress);
 
@@ -2460,10 +2535,10 @@ int hexDigitVal(int c) {
  * raw hex format like: *8D4B969699155600E87406F5B69F;
  * The string is supposed to be at the start of the client buffer
  * and null-terminated.
- * 
+ *
  * The message is passed to the higher level layers, so it feeds
  * the selected screen output, the network output and so forth.
- * 
+ *
  * If the message looks invalid is silently discarded.
  *
  * The function always returns 0 (success) to the caller as there is
@@ -2520,12 +2595,18 @@ char *aircraftsToJson(int *len) {
         }
 
         if (a->lat != 0 && a->lon != 0) {
+            /* Keep the coarse aircraft_type field for backward
+             * compatibility while also providing the full A0..D7
+             * emitter_category. */
+            int aircraft_type = a->emitter_category >> 3;
+
             l = snprintf(p,buflen,
                 "{\"hex\":\"%s\", \"flight\":\"%s\", \"lat\":%f, "
                 "\"lon\":%f, \"altitude\":%d, \"track\":%d, "
-                "\"speed\":%d},\n",
+                "\"speed\":%d, \"aircraft_type\":%d, "
+                "\"emitter_category\":%d},\n",
                 a->hexaddr, a->flight, a->lat, a->lon, altitude, a->track,
-                speed);
+                speed, aircraft_type, a->emitter_category);
             p += l; buflen -= l;
             /* Resize if needed. */
             if (buflen < 256) {
@@ -2550,8 +2631,11 @@ char *aircraftsToJson(int *len) {
     return buf;
 }
 
-#define MODES_CONTENT_TYPE_HTML "text/html;charset=utf-8"
-#define MODES_CONTENT_TYPE_JSON "application/json;charset=utf-8"
+#define MODES_CONTENT_TYPE_HTML "text/html; charset=utf-8"
+#define MODES_CONTENT_TYPE_JSON "application/json"
+#define MODES_CONTENT_TYPE_CSS  "text/css; charset=utf-8"
+#define MODES_CONTENT_TYPE_JS   "application/javascript"
+#define MODES_CONTENT_TYPE_TEXT "text/plain; charset=utf-8"
 
 /* Get an HTTP request header and write the response to the client.
  * Again here we assume that the socket buffer is enough without doing
@@ -2564,7 +2648,8 @@ int handleHTTPRequest(struct client *c) {
     int clen, hdrlen;
     int httpver, keepalive;
     char *p, *url, *content;
-    char *ctype;
+    const char *ctype;
+    const char *status = "200 OK";
 
     if (Modes.debug & MODES_DEBUG_NET)
         printf("\nHTTP request: %s\n", c->buf);
@@ -2592,18 +2677,54 @@ int handleHTTPRequest(struct client *c) {
         printf("HTTP requested URL: %s\n\n", url);
     }
 
-    /* Select the content to send, we have just two so far:
-     * "/" -> Our google map application.
-     * "/data.json" -> Our ajax request to update planes. */
+    /* Select the content to send:
+     * "/" -> The map application.
+     * "/web/assets/..." -> Static UI assets.
+     * "/data.json" -> Aircraft data polled by the UI. */
     if (strstr(url, "/data.json")) {
         content = aircraftsToJson(&clen);
         ctype = MODES_CONTENT_TYPE_JSON;
     } else {
         struct stat sbuf;
         int fd = -1;
+        const char *path = NULL;
 
-        if (stat("gmap.html",&sbuf) != -1 &&
-            (fd = open("gmap.html",O_RDONLY)) != -1)
+        if (!strcmp(url, "/")) {
+            path = "web/index.html";
+            ctype = MODES_CONTENT_TYPE_HTML;
+        } else if (!strcmp(url, "/web/assets/css/style.css")) {
+            path = "web/assets/css/style.css";
+            ctype = MODES_CONTENT_TYPE_CSS;
+        } else if (!strcmp(url, "/web/assets/js/main.js")) {
+            path = "web/assets/js/main.js";
+            ctype = MODES_CONTENT_TYPE_JS;
+        } else if (!strcmp(url, "/web/assets/js/aircraft.js")) {
+            path = "web/assets/js/aircraft.js";
+            ctype = MODES_CONTENT_TYPE_JS;
+        } else if (!strcmp(url, "/web/assets/js/trail.js")) {
+            path = "web/assets/js/trail.js";
+            ctype = MODES_CONTENT_TYPE_JS;
+        } else if (!strcmp(url, "/web/assets/js/panel.js")) {
+            path = "web/assets/js/panel.js";
+            ctype = MODES_CONTENT_TYPE_JS;
+        } else if (!strcmp(url, "/web/assets/js/lib/storage.js")) {
+            path = "web/assets/js/lib/storage.js";
+            ctype = MODES_CONTENT_TYPE_JS;
+        } else if (!strcmp(url, "/web/assets/js/lib/utils.js")) {
+            path = "web/assets/js/lib/utils.js";
+            ctype = MODES_CONTENT_TYPE_JS;
+        } else if (!strcmp(url, "/web/assets/js/lib/icons.js")) {
+            path = "web/assets/js/lib/icons.js";
+            ctype = MODES_CONTENT_TYPE_JS;
+        }
+
+        if (path == NULL) {
+            content = strdup("Not Found");
+            clen = strlen(content);
+            ctype = MODES_CONTENT_TYPE_TEXT;
+            status = "404 Not Found";
+        } else if (stat(path,&sbuf) != -1 &&
+            (fd = open(path,O_RDONLY)) != -1)
         {
             content = malloc(sbuf.st_size);
             if (read(fd,content,sbuf.st_size) == -1) {
@@ -2612,25 +2733,24 @@ int handleHTTPRequest(struct client *c) {
             }
             clen = sbuf.st_size;
         } else {
-            char buf[128];
-
-            clen = snprintf(buf,sizeof(buf),"Error opening HTML file: %s",
-                strerror(errno));
-            content = strdup(buf);
+            content = strdup("Internal Server Error");
+            clen = strlen(content);
+            ctype = MODES_CONTENT_TYPE_TEXT;
+            status = "500 Internal Server Error";
         }
         if (fd != -1) close(fd);
-        ctype = MODES_CONTENT_TYPE_HTML;
     }
 
     /* Create the header and send the reply. */
     hdrlen = snprintf(hdr, sizeof(hdr),
-        "HTTP/1.1 200 OK\r\n"
+        "HTTP/1.1 %s\r\n"
         "Server: Dump1090\r\n"
         "Content-Type: %s\r\n"
         "Connection: %s\r\n"
         "Content-Length: %d\r\n"
         "Access-Control-Allow-Origin: *\r\n"
         "\r\n",
+        status,
         ctype,
         keepalive ? "keep-alive" : "close",
         clen);
@@ -3008,5 +3128,3 @@ int main(int argc, char **argv) {
     rtlsdr_close(Modes.dev);
     return 0;
 }
-
-
