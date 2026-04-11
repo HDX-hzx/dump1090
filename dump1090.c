@@ -2507,6 +2507,7 @@ char *aircraftsToJson(int *len) {
     int buflen = 1024; /* The initial buffer is incremented as needed. */
     char *buf = malloc(buflen), *p = buf;
     int l;
+    time_t now = time(NULL);
 
     l = snprintf(p,buflen,"[\n");
     p += l; buflen -= l;
@@ -2523,9 +2524,9 @@ char *aircraftsToJson(int *len) {
             l = snprintf(p,buflen,
                 "{\"hex\":\"%s\", \"flight\":\"%s\", \"lat\":%f, "
                 "\"lon\":%f, \"altitude\":%d, \"track\":%d, "
-                "\"speed\":%d},\n",
+                "\"speed\":%d, \"messages\":%ld, \"seen\":%d},\n",
                 a->hexaddr, a->flight, a->lat, a->lon, altitude, a->track,
-                speed);
+                speed, a->messages, (int)(now - a->seen));
             p += l; buflen -= l;
             /* Resize if needed. */
             if (buflen < 256) {
