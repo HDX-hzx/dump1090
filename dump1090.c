@@ -2502,16 +2502,75 @@ int decodeHexMessage(struct client *c) {
 }
 
 /* Return a description of planes in json. */
+/* Safe formatted append helper for growable buffers. */
+static int appendf(char **buf, size_t *len, size_t *cap, const char *fmt, ...) {
+    va_list ap;
+    int needed;
+    size_t required;
+    char *tmp;
+
+    if (!buf || !*buf || !len || !cap || !fmt)
+        return -1;
+
+    va_start(ap, fmt);
+    needed = vsnprintf(NULL, 0, fmt, ap);
+    va_end(ap);
+
+    if (needed < 0)
+        return -1;
+
+    required = *len + (size_t)needed + 1; /* +1 for NUL byte */
+
+    if (required > *cap) {
+        size_t newcap = (*cap > 0) ? *cap : 1024;
+
+        while (newcap < required) {
+            if (newcap > SIZE_MAX / 2) {
+                newcap = required;
+                break;
+            }
+            newcap *= 2;
+        }
+
+        tmp = realloc(*buf, newcap);
+        if (!tmp)
+            return -1;
+
+        *buf = tmp;
+        *cap = newcap;
+    }
+
+    va_start(ap, fmt);
+    vsnprintf(*buf + *len, *cap - *len, fmt, ap);
+    va_end(ap);
+
+    *len += (size_t)needed;
+    return 0;
+}
+
+/* Return a description of planes in json. */
 char *aircraftsToJson(int *len) {
     struct aircraft *a = Modes.aircrafts;
-    int buflen = 1024; /* The initial buffer is incremented as needed. */
-    char *buf = malloc(buflen), *p = buf;
-    int l;
+    size_t cap = 1024;
+    size_t used = 0;
+    char *buf = malloc(cap);
 
-    l = snprintf(p,buflen,"[\n");
-    p += l; buflen -= l;
-    while(a) {
-        int altitude = a->altitude, speed = a->speed;
+    if (!buf) {
+        if (len) *len = 0;
+        return NULL;
+    }
+
+    buf[0] = '\0';
+
+    if (appendf(&buf, &used, &cap, "[\n") < 0) {
+        free(buf);
+        if (len) *len = 0;
+        return NULL;
+    }
+
+    while (a) {
+        int altitude = a->altitude;
+        int speed = a->speed;
 
         /* Convert units to metric if --metric was specified. */
         if (Modes.metric) {
@@ -2520,33 +2579,36 @@ char *aircraftsToJson(int *len) {
         }
 
         if (a->lat != 0 && a->lon != 0) {
-            l = snprintf(p,buflen,
+            if (appendf(&buf, &used, &cap,
                 "{\"hex\":\"%s\", \"flight\":\"%s\", \"lat\":%f, "
                 "\"lon\":%f, \"altitude\":%d, \"track\":%d, "
                 "\"speed\":%d},\n",
                 a->hexaddr, a->flight, a->lat, a->lon, altitude, a->track,
-                speed);
-            p += l; buflen -= l;
-            /* Resize if needed. */
-            if (buflen < 256) {
-                int used = p-buf;
-                buflen += 1024; /* Our increment. */
-                buf = realloc(buf,used+buflen);
-                p = buf+used;
+                speed) < 0) {
+                free(buf);
+                if (len) *len = 0;
+                return NULL;
             }
         }
+
         a = a->next;
     }
-    /* Remove the final comma if any, and closes the json array. */
-    if (*(p-2) == ',') {
-        *(p-2) = '\n';
-        p--;
-        buflen++;
-    }
-    l = snprintf(p,buflen,"]\n");
-    p += l; buflen -= l;
 
-    *len = p-buf;
+    /* Remove the final comma if any, and close the JSON array. */
+    if (used >= 2 && buf[used - 2] == ',') {
+        buf[used - 2] = '\n';
+        used--;
+    }
+
+    if (appendf(&buf, &used, &cap, "]\n") < 0) {
+        free(buf);
+        if (len) *len = 0;
+        return NULL;
+    }
+
+    if (len)
+        *len = (int)used;
+
     return buf;
 }
 
