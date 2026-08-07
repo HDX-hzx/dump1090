@@ -3,13 +3,26 @@ LDLIBS+=$(shell pkg-config --libs librtlsdr) -lpthread -lm
 CC?=gcc
 PROGNAME=dump1090
 
-all: dump1090
+# All headers (dump1090.h, anet.h) live at the project root, so every
+# module can just do #include "dump1090.h" regardless of which
+# subdirectory it lives in.
+CFLAGS+=-I.
 
-%.o: %.c
-	$(CC) $(CFLAGS) -c $<
+OBJS=state.o util.o anet.o \
+     core/sdr_capture.o core/demod.o core/decode.o core/aircraft_state.o \
+     net/server.o net/protocols.o net/http_handler.o \
+     ui/interactive_display.o \
+     main.o
 
-dump1090: dump1090.o anet.o
-	$(CC) -g -o dump1090 dump1090.o anet.o $(LDFLAGS) $(LDLIBS)
+all: $(PROGNAME)
+
+%.o: %.c dump1090.h anet.h
+	$(CC) $(CFLAGS) -c $< -o $@
+
+$(PROGNAME): $(OBJS)
+	$(CC) -g -o $(PROGNAME) $(OBJS) $(LDFLAGS) $(LDLIBS)
 
 clean:
-	rm -f *.o dump1090
+	rm -f $(OBJS) $(PROGNAME)
+
+.PHONY: all clean

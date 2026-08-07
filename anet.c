@@ -336,7 +336,10 @@ int anetTcpAccept(char *err, int s, char *ip, int *port) {
     if ((fd = anetGenericAccept(err,s,(struct sockaddr*)&sa,&salen)) == ANET_ERR)
         return ANET_ERR;
 
-    if (ip) strcpy(ip,inet_ntoa(sa.sin_addr));
+    /* strncpy + explicit NUL: inet_ntoa()'s result is at most 15 chars
+     * ("255.255.255.255") plus a NUL, but callers may pass a smaller
+     * buffer, so never write unbounded. */
+    if (ip) { strncpy(ip,inet_ntoa(sa.sin_addr),INET_ADDRSTRLEN-1); ip[INET_ADDRSTRLEN-1] = '\0'; }
     if (port) *port = ntohs(sa.sin_port);
     return fd;
 }
@@ -361,7 +364,10 @@ int anetPeerToString(int fd, char *ip, int *port) {
         ip[1] = '\0';
         return -1;
     }
-    if (ip) strcpy(ip,inet_ntoa(sa.sin_addr));
+    /* strncpy + explicit NUL: inet_ntoa()'s result is at most 15 chars
+     * ("255.255.255.255") plus a NUL, but callers may pass a smaller
+     * buffer, so never write unbounded. */
+    if (ip) { strncpy(ip,inet_ntoa(sa.sin_addr),INET_ADDRSTRLEN-1); ip[INET_ADDRSTRLEN-1] = '\0'; }
     if (port) *port = ntohs(sa.sin_port);
     return 0;
 }
@@ -376,7 +382,10 @@ int anetSockName(int fd, char *ip, int *port) {
         ip[1] = '\0';
         return -1;
     }
-    if (ip) strcpy(ip,inet_ntoa(sa.sin_addr));
+    /* strncpy + explicit NUL: inet_ntoa()'s result is at most 15 chars
+     * ("255.255.255.255") plus a NUL, but callers may pass a smaller
+     * buffer, so never write unbounded. */
+    if (ip) { strncpy(ip,inet_ntoa(sa.sin_addr),INET_ADDRSTRLEN-1); ip[INET_ADDRSTRLEN-1] = '\0'; }
     if (port) *port = ntohs(sa.sin_port);
     return 0;
 }
